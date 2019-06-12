@@ -1,0 +1,141 @@
+---
+title: "Project 1: Global Baseline Predictors and RMSE"
+subtitle: "DATA-612, Summer 2019"
+author: "Fernando Figueres Zeledón"
+output: html_notebook
+---
+
+# Introduction
+
+The following system recommends hypothetical lunch menu items for a group of students.
+
+# Data acquisition & cleaning
+
+```{r Library, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(kableExtra)
+```
+
+```{r data_import, message=FALSE}
+set.seed(123) #Specify seed value to keep results reproducible
+ratings <-
+  read_csv("ratings.csv") %>% #Import raw data from CSV file
+  gather(item, rating, -user) %>% # Convert layout from wide to tall
+  filter(!is.na(rating)) %>% #Remove rows with missing rating value
+  sample_frac(1, replace = FALSE) %>% #Randomize row order
+  mutate(data_cat = if_else(row_number() < n() * 0.8, "Training", "Test", missing = NULL)) #Label 80% of the data for training.
+```
+
+## Calculation of means and biases
+
+First, we use the ratings from the training data to calculate the global average for all user/item combinations. In this case, it's 3.11.
+
+```{r training_avg_calc}
+training_avg <- ratings %>% 
+  filter(data_cat == 'Training') %>% # Select only training data
+  summarise(tmean = mean(rating, na.rm = TRUE)) %>% # Calculate the mean
+  pull %>% # Extract single value from data frame
+  print()
+```
+
+With the mean, we can begin to calculate the user and item biases by subtracting the global average from each user and item average.
+
+We begin by calculating the average rating for each user. We then subtract the global average from each value to obtain the bias. This value gives us an indication of how harsh or generous each user is when rating the menu items relative to other users.
+
+```{r user_avgs}
+user_avgs <- ratings %>% 
+  filter(data_cat == 'Training') %>% # Select the training data
+  group_by(user) %>% #Group by user so R knows what elements to enter into the mean calculation
+  summarise(user_avg = mean(rating, na.rm = TRUE)) %>% #calculate the mean by user, ignoring missing values
+  mutate(user_bias = user_avg - training_avg) #calculate the bias
+
+user_avgs %>% 
+  kable(digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F)
+```
+
+We complete a similar operation but this time we calculate the average rating and bias by menu item. This gives us an indication of which items are more popular relative to the rest.
+
+```{r item_avgs}
+item_avgs <- ratings %>% 
+  filter(data_cat == 'Training') %>% 
+  group_by(item) %>% 
+  summarise(item_avg = mean(rating, na.rm = TRUE)) %>% 
+  mutate(item_bias = item_avg - training_avg)
+
+item_avgs %>% 
+  kable(digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F)
+```
+
+# User/item matrix
+
+We've managed to calculate an average rating for all user/item combinations and bias values for each user and item. With these value we can calculate the baseline predictor for all combinations, even those that didn't have a rating.
+
+```{r baseline_predictors}
+## From the raw average, and the appropriate user and item biases, calculate the baseline predictors for every user-item combination.
+bl_pred_df <- crossing(item_avgs, user_avgs) %>% # Ggenerate a dataframe with all user/item combinations
+  mutate(bl_predictor = item_bias + user_bias + training_avg) %>% # Create baseline predictor column
+  mutate(bl_predictor = pmax(pmin(bl_predictor, 5), 1)) %>% # Clip values to between 1 and 5.
+  select(item, user, bl_predictor) # Remove unnecesary columns
+
+bl_pred_df %>% 
+  spread(item, bl_predictor) %>% #rearange dataframe into a standar user/item matrix
+  kable(digits = 2) %>% # limit decimals places
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F) #formatting
+```
+
+# RMSE Calculation
+
+Now that we have both average and baseline predictions, we can calculate RMSE values to compare the accuracy of the predictions on both our training and test sets.
+
+```{r rmse_cals}
+rmse_calcs <- ratings %>% 
+  left_join(bl_pred_df, by = c('user','item')) %>% # Add bias values to our initial data
+  mutate(sq_err_bl_pred = (rating - bl_predictor)**2) %>% # Calculate the squared error for our baseline predictor
+  mutate(sq_err_avg_pred = (rating - training_avg)**2) # Calculate the squared error for our average predictor
+
+rmse_calcs %>% 
+  kable(col.names = c("User","Item","Rating","Category","Baseline","Baseline sq. error","Avg. sq. error")) %>% # Rename columns
+  kable_styling(bootstrap_options = c("striped", "hover"),fixed_thead = T, full_width = F) # Formatting
+```
+
+```{r}
+rmse_df <- rmse_calcs %>% 
+  gather(error_type,error_val, sq_err_bl_pred:sq_err_avg_pred) %>% # Convert from wide to tall
+  group_by(error_type, data_cat) %>% # Group by error type so R calculates the means correctly
+  summarise(rmse = sqrt(mean(error_val, na.rm = TRUE))) %>% # Calculate the square root of the mean.
+  type.convert() # Convert users and items to factors (for barplot below)
+
+rmse_df %>% 
+  kable(digits = 4) %>% # Limit to 4 decimal places
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F) #formatting
+```
+
+```{r}
+1-(rmse_df$rmse[3] / rmse_df$rmse[1]) #RMSE % improvement Test set
+
+1-(rmse_df$rmse[4] / rmse_df$rmse[2]) #RMSE % improvement training set
+```
+
+
+```{r}
+ggplot(rmse_df, aes(x = error_type, y = rmse, fill = error_type)) +
+  geom_bar(stat = "identity") +
+  facet_grid( ~ data_cat) +
+  scale_fill_brewer(palette = "Paired") +
+  labs(title = "RMSE by data group and predictor type",
+       subtitle = "",
+       caption = "The RMSE for both data groups is based on the avg. and bias values of the training data.") +
+  ylab("RMSE") +
+  theme_minimal() +
+  theme(legend.position = "none", axis.title.x = element_blank()) +
+  geom_text(aes(label = round(rmse, 2)),
+            vjust = 1.6,
+            color = "white",
+            size = 5) +
+  scale_x_discrete(labels = c("Avg. Rating \n (Training Data)", "Baseline Predictor"))
+```
+
+
+As we can see from the caluculations above, using the baseline predictor vs the raw average results in a 17.9% improvement in the RMSE for the test data set. For the training data set, we observe a 24.7% improvement.
